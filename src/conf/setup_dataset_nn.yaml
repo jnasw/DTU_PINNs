@@ -15,7 +15,7 @@ model:
   torch : True # Keep it True when training the model! and also using to create the collocaiton points
   
 dataset:
-  number : 1 # Number of dataset to be used
+  number : 2 # Number of dataset to be used
   shuffle: True # Shuffle the trajectories of the dataset # If True, the dataset will be shuffled
   split_ratio: 0.8 # Train and validation/test split ratio, the rest is splitted equally for validation/test
   validation_flag : True # Use validation set

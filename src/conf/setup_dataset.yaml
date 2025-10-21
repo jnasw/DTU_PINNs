@@ -3,7 +3,7 @@ wandb:
   project: "Project_PINN_for_synchronous_machine"
 
 time : 1 # Total time
-num_of_points : 1000 # Number of points
+num_of_points : 100 # Number of points
 modelling_method : True # Modelling approach to be followed, ddelta = omega or ddelta = omega*Omega_B
 
 model:

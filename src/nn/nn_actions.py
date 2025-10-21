@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import os
+import matplotlib
+matplotlib.use("Agg")  # Use non-GUI backend
 import matplotlib.pyplot as plt
 from src.nn.nn_dataset import DataSampler
 from src.nn.nn_model import Net, Network, PinnA, FullyConnectedResNet, Kalm
@@ -71,8 +73,13 @@ class NeuralNetworkActions():
     def __init__(self, cfg, modelling_full): # The modelling equations are used, must be predefined, more choices to be added such as dynamic modelling
         self.cfg = cfg
         set_random_seeds(cfg.seed) # set all seeds
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  
-
+        #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  
+        if torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
         self.modelling_full = modelling_full
         self.data_loader = DataSampler(cfg)
         self.input_dim = self.data_loader.input_dim # The input dimension is the number of input features
@@ -891,7 +898,7 @@ class NeuralNetworkActions():
                 self.keys = model.get("keys")
 
         for var in range(len(self.keys)):
-            plt.figure()
+            #plt.figure()
             plt.title(f"Trajectories {starting_traj} to {starting_traj+total_traj} for variable {self.keys[var]}")
             # plot with x axis x_test[:,0]
             plt.plot(x_test[down_limit:upper_limit,0].detach().cpu().numpy(), output[down_limit:upper_limit,var].detach().cpu().numpy(), label="Predicted")
@@ -1056,6 +1063,8 @@ class NeuralNetworkActions():
         plt.plot(x_train, y_train, 'ro', label='Original data')
         plt.plot(x_train, y_pred, 'kx-', label='Fitted line')
         plt.show()
+        #plt.savefig("plot_plot.png")
+        #plt.close()
         return
     
     def plot_all(self, x_train, y_train):
@@ -1071,13 +1080,23 @@ class NeuralNetworkActions():
         y_train = y_train.cpu().detach().numpy()
         y_pred = y_pred.cpu().detach().numpy()
         plt.figure(figsize=(10, 5))  # Create a figure with a specific size
+        #for i in range(y_train.shape[1]):
+            # plt.subplot(1, 2, i % 2 + 1)  # Create subplots, alternating between two columns
+            # plt.plot(x_train, y_train[:, i], 'ro', label='Original data')
+            # plt.plot(x_train, y_pred[:, i], 'kx-', label='Fitted line')
+            # plt.legend()
+            # if i % 2 != 0:
+            #     plt.show()  # Show the plot after every two iterations
+                #plt.savefig("plot_all_plot.png")
+                #plt.close()
         for i in range(y_train.shape[1]):
-            plt.subplot(1, 2, i % 2 + 1)  # Create subplots, alternating between two columns
+            plt.figure()
             plt.plot(x_train, y_train[:, i], 'ro', label='Original data')
             plt.plot(x_train, y_pred[:, i], 'kx-', label='Fitted line')
             plt.legend()
-            if i % 2 != 0:
-                plt.show()  # Show the plot after every two iterations
+            plt.title(f'Variable {i}')
+            plt.savefig(f"plot_all_var_{i}.png")
+            plt.close()
         return
     
     def plot_all_dt(self, x_train, y_train):
@@ -1091,11 +1110,19 @@ class NeuralNetworkActions():
         dt = dt.cpu().detach().numpy()
         dt_pred = dt_pred.cpu().detach().numpy()
         plt.figure(figsize=(10, 5))
+        # for i in range(y_train.shape[1]):
+        #     plt.subplot(1, 2, i % 2 + 1)
+        #     plt.plot(x_train, dt[:, i], 'ro', label='Original data')
+        #     plt.plot(x_train, dt_pred[:, i], 'kx-', label='Fitted line')
+        #     plt.legend()
+        #     if i % 2 != 0:
+        #         plt.show()
         for i in range(y_train.shape[1]):
-            plt.subplot(1, 2, i % 2 + 1)
-            plt.plot(x_train, dt[:, i], 'ro', label='Original data')
-            plt.plot(x_train, dt_pred[:, i], 'kx-', label='Fitted line')
+            plt.figure()
+            plt.plot(x_train, dt[:, i], 'ro', label='Original dt')
+            plt.plot(x_train, dt_pred[:, i], 'kx-', label='Fitted dt')
             plt.legend()
-            if i % 2 != 0:
-                plt.show()
+            plt.title(f'Derivative Variable {i}')
+            plt.savefig(f"plot_all_dt_var_{i}.png")
+            plt.close()
         return
