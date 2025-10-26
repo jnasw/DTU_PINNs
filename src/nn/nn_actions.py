@@ -70,7 +70,7 @@ class NeuralNetworkActions():
 
      
     """
-    def __init__(self, cfg, modelling_full): # The modelling equations are used, must be predefined, more choices to be added such as dynamic modelling
+    def __init__(self, cfg, modelling_full, data_loader=None, dataset_path=None, load_data=True): # The modelling equations are used, must be predefined, more choices to be added such as dynamic modelling
         self.cfg = cfg
         set_random_seeds(cfg.seed) # set all seeds
         #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  
@@ -80,11 +80,25 @@ class NeuralNetworkActions():
             self.device = torch.device("cuda")
         else:
             self.device = torch.device("cpu")
-        self.modelling_full = modelling_full
-        self.data_loader = DataSampler(cfg)
-        self.input_dim = self.data_loader.input_dim # The input dimension is the number of input features
-        self.output_dim = self.input_dim-1 # The output dimension is the input dimension minus the time column
 
+        # --- Handle data loading logic ---
+        if data_loader is not None:
+            # Use externally provided data loader
+            self.data_loader = data_loader
+            self.input_dim = data_loader.input_dim
+            self.output_dim = data_loader.input_dim - 1
+        elif load_data:
+            # Default: load internally from cfg
+            self.data_loader = DataSampler(cfg, dataset_path=dataset_path)
+            self.input_dim = self.data_loader.input_dim
+            self.output_dim = self.input_dim - 1
+        else:
+            # If no data is provided or loaded
+            self.data_loader = None
+            self.input_dim = None
+            self.output_dim = None
+        
+        self.modelling_full = modelling_full
         self.model = self.define_nn_model() # Create an instance of the class Net
         self.weight_init(self.model, cfg.nn.weight_init) # Initialize the weights of the Net
         self.criterion = self.custom_loss(cfg.nn.loss_criterion) # Define the loss function
@@ -691,6 +705,18 @@ class NeuralNetworkActions():
             num_epochs (int): number of epochs
         """
         x_train, y_train, x_train_col, x_train_col_ic, y_train_col_ic, x_val, y_val = self.data_loader.define_train_val_data2(self.cfg.dataset.perc_of_data_points, self.cfg.dataset.perc_of_col_points, num_of_skip_data_points, num_of_skip_col_points, num_of_skip_val_points) # define the training and validation data
+        
+        # --- Ensure all tensors are on the correct device ---
+        to_dev = lambda t, req=False: t.to(self.device, dtype=torch.float32).requires_grad_(req) if isinstance(t, torch.Tensor) else t
+
+        x_train        = to_dev(x_train, True)
+        y_train        = to_dev(y_train)
+        x_train_col    = to_dev(x_train_col, True)
+        x_train_col_ic = to_dev(x_train_col_ic, True)
+        y_train_col_ic = to_dev(y_train_col_ic)
+        x_val          = to_dev(x_val, True)
+        y_val          = to_dev(y_val)
+        
         # Create DataLoaders for batch processing
         batch_size = self.cfg.nn.batch_size if self.cfg.nn.batch_size != "None" else max(len(x_train), len(x_train_col), len(x_train_col_ic))
         train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size)
@@ -865,6 +891,11 @@ class NeuralNetworkActions():
         sample_per_traj = int(self.data_loader.sample_per_traj)
 
         x_test,y_test = self.data_loader.define_test_data(starting_traj,sample_per_traj,total_traj)
+
+        # --- Move test data to the same device as the model ---
+        x_test = x_test.to(self.device, dtype=torch.float32)
+        y_test = y_test.to(self.device, dtype=torch.float32)
+
         self.model.eval()
         y_pred = self.forward_pass(x_test)
         test_loss = self.criterion(y_pred, y_test)
@@ -976,7 +1007,8 @@ class NeuralNetworkActions():
                     run.log({f"RMSE for variable {self.keys[i]}": rmse[j,i], "Time": time[j]})
 
         max_mae = torch.max(mae2)  # Find the maximum absolute error
-        run.log({"Test Max AE": max_mae.item()})
+        if run is not None:
+            run.log({"Test Max AE": max_mae.item()})
         #save the mae and rmse
         full_path = os.path.join(self.cfg.dirs.model_dir, self.final_name)
         np.save(full_path+"_mae.npy", mae)

@@ -65,9 +65,10 @@ class DataSampler:
         create_col_points: Create the collocation points.
     """
     
-    def __init__(self, cfg):
+    def __init__(self, cfg, dataset_path=None):
         self.cfg = cfg
         self.idx = 0
+        self.dataset_path = dataset_path
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_flag = cfg.model.model_flag #  'SM_IB' or 'SM' or 'SM_AVR' or 'SM_GOV'
         self.shuffle = cfg.dataset.shuffle # Define whether to shuffle the data before splitting
@@ -109,9 +110,19 @@ class DataSampler:
         number_of_dataset = self.cfg.dataset.number # Define the number of the dataset to load
         name = model_flag + '/dataset_v' + str(number_of_dataset) + '.pkl'
         print(model_flag,self.cfg.dirs.dataset_dir)
-        dataset_path = "./"+self.cfg.dirs.dataset_dir+"/"+name #os.path.join(self.cfg.dirs.dataset_dir, name) # Define the path to the dataset
-        print("Loading data from: ", dataset_path)
-        with open(dataset_path, 'rb') as f:
+        # dataset_path = "./"+self.cfg.dirs.dataset_dir+"/"+name #os.path.join(self.cfg.dirs.dataset_dir, name) # Define the path to the dataset
+        # print("Loading data from: ", dataset_path)
+        # with open(dataset_path, 'rb') as f:
+        #     sol = pickle.load(f)
+        if self.dataset_path is not None:
+            dataset_path = self.dataset_path
+        else:
+            name = f"{self.cfg.model.model_flag}/dataset_v{self.cfg.dataset.number}.pkl"
+            dataset_path = os.path.join(self.cfg.dirs.dataset_dir, name)
+
+        print("Loading data from:", dataset_path)
+        
+        with open(dataset_path, "rb") as f:
             sol = pickle.load(f)
         input_dim = len(sol[0])
         total_trajectories = len(sol)

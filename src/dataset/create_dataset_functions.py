@@ -273,41 +273,144 @@ class ODE_modelling():
         print(f"Generated {len(init_condition_table)} initial condition samples using {self.sampling} sampling")
         return init_condition_table
     
-    def create_init_conditions_set5(self, previous_ICs, previous_errors, total_samples=1000, exploration_ratio=0.2):
+    def create_init_conditions_set5(
+        self,
+        previous_ICs,
+        previous_errors,
+        total_samples=1000,
+        exploration_ratio=0.2,
+        mutation_std=0.0,
+        range_scale=1.0,
+    ):
         """
-        Evo sampling: keep high-error ICs and add new exploratory ones.
+        Generate initial conditions using an evolutionary (Evo) sampling strategy.
 
-        Args:
-            previous_ICs (list): Previous initial conditions (list of lists)
-            previous_errors (list or np.array): Residual error per IC
-            total_samples (int): Total number of ICs to return
-            exploration_ratio (float): Fraction of new random samples to include
+        The Evo approach combines **exploitation** (reusing or perturbing high-error
+        initial conditions from a previous dataset) and **exploration** (sampling new,
+        unseen initial conditions within the physical variable ranges).
 
-        Returns:
-            list: New initial conditions using Evo strategy
+        It builds upon the Random/LHS dataset (Set 4) and uses the ODE residuals
+        or other error metrics from that dataset to guide the selection of new ICs.
+
+        ---
+        Evolutionary strategy overview:
+        --------------------------------
+        - **Exploit:** Selects a fraction of previous ICs with the highest residual errors
+        and reuses them (optionally with Gaussian perturbations).
+        This focuses the dataset on regions where the model performed poorly.
+        - **Explore:** Generates a fraction of new ICs randomly or via Latin Hypercube Sampling
+        within the (possibly scaled) variable ranges.
+        This promotes diversity and helps the model generalize.
+
+        Both subsets are then combined to form the next generation of training ICs.
+
+        ---
+        Args
+        ----
+        previous_ICs : list or np.ndarray
+            Initial conditions used in the previous dataset (e.g. from Set 4).
+            Shape (N_prev, n_vars), where each row is one initial condition.
+
+        previous_errors : list or np.ndarray
+            Associated residuals or error scores for each previous IC.
+            Higher values indicate poorer model performance.
+
+        total_samples : int, default=1000
+            Total number of initial conditions to generate for the new dataset.
+
+        exploration_ratio : float, default=0.2
+            Fraction of new ICs to create via exploration (random/LHS sampling).
+            The remaining (1 - exploration_ratio) fraction is filled by exploiting
+            high-error ICs from the previous dataset.
+
+            Example:
+                - 0.0 → fully exploit high-error ICs (no exploration)
+                - 1.0 → fully random exploration (no reuse)
+                - 0.2 → 20% explore, 80% exploit (default balanced)
+
+        mutation_std : float, default=0.0
+            Standard deviation of Gaussian noise added to exploited ICs
+            to increase local diversity around known high-error points.
+            Expressed in absolute units of each IC variable.
+
+            Example:
+                - 0.0 → reuse high-error ICs exactly
+                - 0.05 → add small random perturbations to exploit ICs
+
+        range_scale : float, default=1.0
+            Global scaling factor applied to the variable ranges defined in the YAML file.
+            Values > 1.0 expand the IC space, allowing for extrapolative datasets.
+
+            Example:
+                - 1.0 → use original physical ranges
+                - 2.0 → double the width of each range (wider IC distribution)
+
+        ---
+        Returns
+        -------
+        init_condition_table : list of list[float]
+            The new set of initial conditions (ICs), where each inner list contains
+            one sample’s values for all state variables.
+
+            Shape: (total_samples, n_vars)
+
+        ---
+        Side Effects
+        ------------
+        Stores the final exploited and explored ICs as attributes for later visualization:
+            self.exploit_ics : np.ndarray of exploited ICs
+            self.explore_ics : list of newly sampled ICs
+
+        ---
+        Notes
+        -----
+        - Requires residuals or error metrics (`previous_errors`) from the previous dataset.
+        - Uses the same variable definitions and ranges as defined in the
+        corresponding `init_cond.yaml` or `nn_init_cond.yaml` file.
+        - Can be used iteratively across dataset generations to evolve IC distributions.
+
+        ---
+        Example
+        -------
+        >>> init_conditions_set5 = SM_model.create_init_conditions_set5(
+        ...     previous_ICs=init_conditions_set4,
+        ...     previous_errors=residuals_set4,
+        ...     total_samples=1000,
+        ...     exploration_ratio=0.2,
+        ...     mutation_std=0.05,
+        ...     range_scale=1.5
+        ... )
+        [Evo Sampling] Generated 1000 ICs: 800 exploit, 200 explore | range_scale=1.5, mutation_std=0.05
         """
-
-        # --- Load ranges from YAML ---
-        if self.torch:
-            init_conditions_path = os.path.join(self.init_conditions_dir, self.model_flag, "nn_init_cond" + str(self.init_condition_bounds) + ".yaml")
-        else:
-            init_conditions_path = os.path.join(self.init_conditions_dir, self.model_flag, "init_cond" + str(self.init_condition_bounds) + ".yaml")
-
+        # --- Load ranges ---
+        init_conditions_path = os.path.join(
+            self.init_conditions_dir, self.model_flag,
+            ("nn_init_cond" if self.torch else "init_cond") + str(self.init_condition_bounds) + ".yaml"
+        )
         init_conditions = OmegaConf.load(init_conditions_path)
         self.check_ic_yaml(init_conditions)
 
-        ranges = [cond["range"] for cond in init_conditions]
-        variables = [cond["name"] for cond in init_conditions]
+        # Apply range scaling
+        ranges = []
+        for cond in init_conditions:
+            r = cond["range"]
+            if len(r) > 1:
+                center = np.mean(r)
+                half_width = (r[1] - r[0]) / 2 * range_scale
+                scaled_range = [center - half_width, center + half_width]
+                ranges.append(scaled_range)
+            else:
+                ranges.append(r)
         num_variables = len(ranges)
 
-        # --- Parameters ---
+        # --- Determine exploitation and exploration sizes ---
         n_exploit = int((1 - exploration_ratio) * total_samples)
-        n_explore = total_samples - n_exploit
+        n_explore = int(total_samples - n_exploit)  # ensure integer
 
-        # --- Select high-error ICs ---
         previous_ICs = np.array(previous_ICs)
         previous_errors = np.array(previous_errors)
 
+        # --- Select top high-error ICs for exploitation ---
         top_k_idx = np.argsort(previous_errors)[-n_exploit:]
         exploit_ics = previous_ICs[top_k_idx]
 
@@ -315,10 +418,17 @@ class ODE_modelling():
         if self.seed is not None:
             np.random.seed(self.seed)
 
-        if self.sampling == "Lhs":
-            samples = lhs(n=num_variables, samples=n_explore)
+         # Add Gaussian mutation to exploit ICs if specified
+        if mutation_std > 0:
+            exploit_ics = exploit_ics + np.random.normal(0, mutation_std, exploit_ics.shape)
+
+        if n_explore > 0:  # only sample if exploration part > 0
+            if self.sampling == "Lhs":
+                samples = lhs(n=num_variables, samples=n_explore)
+            else:
+                samples = np.random.uniform(0, 1, size=(n_explore, num_variables))
         else:
-            samples = np.random.uniform(0, 1, size=(n_explore, num_variables))
+            samples = np.empty((0, num_variables))  # no exploration part
 
         explore_ics = []
         for sample in samples:
@@ -331,13 +441,12 @@ class ODE_modelling():
                 condition.append(actual_val)
             explore_ics.append(condition)
 
-        # --- Combine and return ---
         init_condition_table = list(exploit_ics) + explore_ics
-        print(f"[Evo Sampling] Generated {len(init_condition_table)} ICs: {n_exploit} exploit, {n_explore} explore")
+        print(f"[Evo Sampling] {len(init_condition_table)} ICs ({n_exploit} exploit, {n_explore} explore) | "
+            f"range_scale={range_scale}, mutation_std={mutation_std}")
 
-        self.exploit_ics = exploit_ics         # store for later
+        self.exploit_ics = exploit_ics
         self.explore_ics = explore_ics
-        
         return init_condition_table
 
     def solve(self, x0, method, modelling_full):
@@ -392,7 +501,7 @@ class ODE_modelling():
             print(f"Time taken to solve the model for {len(init_conditions)} initial conditions: {end_time - start_time} seconds.")
         return solution_all
     
-    def save_dataset(self, solution):
+    def save_dataset(self, solution, label=None):
         """
         Create and save dataset for the model.
 
@@ -412,20 +521,30 @@ class ODE_modelling():
         # check if folder exists if not create it
         if not os.path.exists(os.path.join(self.dataset_dir, self.model_flag)):
             os.makedirs(os.path.join(self.dataset_dir, self.model_flag))
+            
+        target_dir = os.path.join(self.dataset_dir, self.model_flag)
 
-        # count the number of files in the directory
-        num_files = len([f for f in os.listdir(os.path.join(self.dataset_dir, self.model_flag)) if os.path.isfile(os.path.join(self.dataset_dir, self.model_flag, f))])
-        print("Number of files in the directory: ", num_files)
-        print(f'Saved dataset "{self.model_flag, "dataset_v" + str(num_files + 1)}".')
-        wandb.log({"Dataset saved": f'Saved dataset "{self.model_flag, "dataset_v" + str(num_files + 1)}".'})
-        # save the dataset as pickle in the dataset directory
-        dataset_path = os.path.join(self.dataset_dir, self.model_flag, "dataset_v" + str(num_files + 1) + ".pkl")
+        # If no label → continue numbering scheme
+        if label is None:
+            num_files = len([
+                f for f in os.listdir(target_dir)
+                if os.path.isfile(os.path.join(target_dir, f))
+            ])
+            filename = f"dataset_v{num_files + 1}.pkl"
+        else:
+            # Use label directly
+            filename = f"dataset_{label}.pkl"
+
+        dataset_path = os.path.join(target_dir, filename)
+
+        # Save dataset
         with open(dataset_path, 'wb') as f:
             pickle.dump(dataset, f)
 
-        return dataset
+        print(f'Saved dataset: "{filename}" in "{target_dir}"')
+        wandb.log({"Dataset saved": filename})
 
-   
+        return dataset
 
     def load_dataset(self, name):
         """
