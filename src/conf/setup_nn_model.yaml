@@ -1,0 +1,22 @@
+DynamicNN:
+  hidden_layers : 4
+  hidden_dim : 64
+
+KAN:
+  kan_layers : 2 # 1
+  kan_hidden_dim : 12 # 5,9,13
+  G : 5 #7,10
+  k : 3
+
+PinnA:
+  hidden_layers : 4
+  hidden_dim : 64
+
+actnet: 
+  num_freqs : 10 # 2, 8, 16
+  hidden_dim : 25 # 12, 24, 36
+  hidden_layers : 2 # 1, 2
+  freq_scaling : True # True, False
+  freq_scaling_eps : 1e-2 # 1e-2, 1e-3
+  freq_scaling_eps_decay : 1e-3 # 1e-3, 1e-4
+  

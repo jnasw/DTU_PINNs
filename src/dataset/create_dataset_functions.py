@@ -7,48 +7,47 @@ import numpy as np
 from pyDOE import lhs
 from scipy.integrate import solve_ivp
 import time
+import h5py
 
 class ODE_modelling():
     def __init__(self, config):
         """
-        Initializes an instance of ODE_modelling.
+        Initializes an instance of ClassName.
         Args:
             config: The configuration object containing various parameters.
 
         Attributes:
             config (object): The configuration object.
-            modelling_method (str): The modelling method.
-            model_flag (str): The model flag.
+            modelling_method (str): The modelling method: "Ground truth" or "Collocation".
+            model_flag (str): The model flag: SM, SM_AVR or SM_AVR_GOV.
             time (str): The time interval for the simulation.
-            num_of_points (int): The number of points for the simulation.
-            init_condition_bounds (str): The bounds for initial conditions.
-            sampling (str): The sampling method.
-            init_conditions_dir (str): The directory for initial conditions.
+            machine_num (int): The machine number that will be used.
+            init_conditions (str): The initial conditions set 
+            params_dir (str): The directory for parameters: machine, avr, gov and system.
+            init_conditions_dir (str): The directory for initial conditions per machine modelling type: SM, SM_AVR and SM_AVR_GOV.
             dataset_dir (str): The directory for saving the dataset.
             torch (bool): The flag to use PyTorch for the model.
-            seed (int or None): The seed for random number generation.
+
         Methods:
+            define_machine_params: Define the parameters of the synchronous machine based on the machine_num.
+            define_system_params: Define the system parameters of the synchronous machine.
             append_element: Appends an element to each state in the given value set by iterating over a range of values.
             append_element_set: Appends an element to each state in the given value set by iterating over a range of values.
-            check_ic_yaml: Modeling guide contains all the variables that can be used in the modeling.
-            create_init_conditions_set3: Define the various initial conditions of the synchronous machine and return a matrix with all the possible combinations.
-            solve: Solve the differential equations for the synchronous machine model.
+            create_init_conditions_set: Define the various initial conditions of the synchronous machine and return a matrix with all the possible combinations.
+            create_solver: Create the solver for the synchronous machine model.
             solve_sm_model: Solves the synchronous machine model for multiple initial conditions.
             save_dataset: Create and save dataset for the model.
             load_dataset: Load the dataset.
         """
         self.config = config
-        self.modelling_method = config.modelling_method
         self.model_flag = config.model.model_flag
         self.time = config.time
         self.num_of_points = config.num_of_points
         self.init_condition_bounds = config.model.init_condition_bounds
         self.sampling = config.model.sampling
-        self.init_conditions_dir = config.dirs.init_conditions_dir
-        self.dataset_dir = config.dirs.dataset_dir
         self.torch = config.model.torch
         self.seed = None if not hasattr(config.model, 'seed') else config.model.seed
-
+        self.load_keys()
     
     def append_element(self, value_set, Value_range, num_ranges):
         """
@@ -61,7 +60,9 @@ class ODE_modelling():
 
         Returns:
             list: A new list of states with the element appended.
+
         """
+        
         new_value_set = []
         for j in range(len(value_set)):
             for i in range(num_ranges):
@@ -70,22 +71,54 @@ class ODE_modelling():
                 new_state.extend([value])
                 new_value_set.append(new_state)
         return new_value_set
-    
+
+    def load_keys(self):
+
+        init_conditions_dir = self.config.dirs.init_conditions_dir
+        modeling_guide_path = os.path.join(init_conditions_dir, "modellings_guide.yaml")
+        modeling_guide = OmegaConf.load(modeling_guide_path)
+        for model in modeling_guide:
+            model_name = model.get("name")
+            if model_name == self.model_flag:
+                keys = model.get("keys")
+                self.fullname = model.get("fullname")
+                #load keys_ext if exist in model
+                keys_ext = model.get("keys_ext")
+                #set attr length of keys and keys_ext
+                self.keys_length = len(keys)
+                self.keys_ext_length = len(keys_ext) if keys_ext else 0
+                #append keys_ext to keys for the initial conditions check
+                if keys_ext:
+                    self.keys = keys + keys_ext
+                else:
+                    self.keys = keys
+        if not keys:
+            raise ValueError(f"Model {self.model_flag} not found in modeling guide")
+        return 
+
+    def check_ic_yaml(self,init_conditions):
+        """
+        Modeling guide contains all the variables that can be used in the modeling.
+        Check if the variables in the initial conditions are in the modeling guide in the correct order
+        """
+        
+
+        for i in range(len(init_conditions)):
+            name = init_conditions[i].get("name")
+            if name not in self.keys:
+                raise ValueError(f"Variable {name} not found in modeling guide")
+            if name != self.keys[i]: #same order as in the modeling guide
+                raise ValueError(f"Variable {name} does not match the modeling variable {self.keys[i]}")
+            #check if iterations are always a number:
+            iterations = init_conditions[i].get("iterations")
+            if not isinstance(iterations, int):
+                raise ValueError(f"Variable {name} iterations must be an integer")
+        return
+
+
     
     def append_element_set(self, value_set, Value_range, num_ranges):
-        """
-        Appends an element to each state in the given value set by iterating over a range of values.
-        
-        Args:
-            value_set (list): The list of states to which the element will be appended.
-            Value_range (tuple): The range of values from which the element will be selected.
-            num_ranges (int): The number of ranges to divide the Value_range into.
-
-        Returns:
-            list: A new list of states with the element appended.
-        """
-
-        np.random.seed(self.seed if self.seed is not None else np.random.randint(0, 1000))
+        seed = (self.seed if self.seed is not None else np.random.randint(0, 1000))
         if self.sampling=="Random":
             points = np.random.uniform(0, 1, num_ranges)
             points = points.reshape(-1, 1)
@@ -114,52 +147,67 @@ class ODE_modelling():
                     new_state.extend([value])
                     new_value_set.append(new_state)
         return new_value_set
+    
 
-    def check_ic_yaml(self,init_conditions):
+    def create_init_table2(self, set_of_values, iterations):
         """
-        Checks if the variables in the initial conditions are present in the modeling guide and in the correct order.
-        Also verifies that the iterations for each variable are integers.
+        Creates an initialization table for multiple variables.
 
-        Args:
-            init_conditions (list): List of initial conditions for which the model needs to be solved.
+        Parameters:
+        - variables: List of dictionaries with keys:
+        - "name": Variable name (not used in calculations but can be kept for reference).
+        - "range": List containing either [min, max] or a single fixed value.
+        - "iterations": Number of sample points for this variable.
 
         Returns:
-            None or ValueError: If the variables are not present in the modeling guide or the iterations are not integers.
+        - A list of sampled initialization points, where each row is a combination of values for all variables.
         """
-        modeling_guide_path = os.path.join(self.init_conditions_dir, "modellings_guide.yaml")
-        modeling_guide = OmegaConf.load(modeling_guide_path)
-        #check if proposed modeling is in the modeling guide
-        for model in modeling_guide:
-            model_name = model.get("name")
-            if model_name == self.model_flag:
-                keys = model.get("keys")
-                self.fullname = model.get("fullname")
-        if not keys:
-            raise ValueError(f"Model {self.model_flag} not found in modeling guide")
 
-        for i in range(len(init_conditions)):
-            name = init_conditions[i].get("name")
-            if name not in keys:
-                raise ValueError(f"Variable {name} not found in modeling guide")
-            if name != keys[i]: #same order as in the modeling guide
-                raise ValueError(f"Variable {name} does not match the modeling variable {keys[i]}")
-            #check if iterations are always a number:
-            iterations = init_conditions[i].get("iterations")
-            if not isinstance(iterations, int):
-                raise ValueError(f"Variable {name} iterations must be an integer")
-        return
+        sampled_points = []
+        for i in range(len(set_of_values)):
+            v_range = set_of_values[i]
+            num_samples = iterations[i]
 
-    def create_init_conditions_set3(self):
+            if len(v_range) == 1 or num_samples == 1:
+                # If only one value is needed, use it directly
+                sampled_values = np.array([v_range[0]])  
+            else:
+                v_min, v_max = v_range  # Unpack range
+
+                # Select sampling method
+                if self.sampling == "Random":
+                    points = np.random.uniform(0, 1, num_samples).reshape(-1, 1)
+                elif self.sampling == "Linear":
+                    points = np.linspace(0, 1, num_samples).reshape(-1, 1)
+                elif self.sampling == "Lhs":
+                    points = lhs(n=1, samples=num_samples)
+                else:
+                    raise Exception(f"Sampling method '{self.sampling}' not implemented.")
+
+                # Scale to the desired range
+                sampled_values = v_min + points * (v_max - v_min)
+
+            sampled_points.append(sampled_values.flatten())
+
+        # Create the initialization table by taking all possible combinations
+        init_condition_table = np.array(np.meshgrid(*sampled_points)).T.reshape(-1, len(set_of_values))
+
+        return init_condition_table.tolist()
+
+
+    def create_init_conditions_info(self):
         """
         Define the various initial conditions of the synchronous machine and return a matrix with all the possible combinations.
 
         Returns:
             list: A matrix with all the possible combinations of initial conditions.
         """
+        init_conditions_dir = self.config.dirs.init_conditions_dir
         if self.torch:# if using torch then use the nn_init_cond.yaml file to create collocation points init conditions
-            init_conditions_path = os.path.join(self.init_conditions_dir, self.model_flag,"nn_init_cond"+str(self.init_condition_bounds)+".yaml")
+            init_conditions_path = os.path.join(init_conditions_dir, self.model_flag,"nn_init_cond"+str(self.init_condition_bounds)+".yaml")
         else: # 
-            init_conditions_path = os.path.join(self.init_conditions_dir, self.model_flag,"init_cond"+str(self.init_condition_bounds)+".yaml")
+            init_conditions_path = os.path.join(init_conditions_dir, self.model_flag,"init_cond"+str(self.init_condition_bounds)+".yaml")
+        self.init_conditions_path = init_conditions_path
         init_conditions = OmegaConf.load(init_conditions_path)
         self.check_ic_yaml(init_conditions)
 
@@ -187,269 +235,30 @@ class ODE_modelling():
             #wandb.log({"Number of different initial conditions for collocation points: ": number_of_conditions})
         else:
             print("Number of different initial conditions: ", number_of_conditions)
-            #wandb.log({"Number of different initial conditions: ": number_of_conditions})
+            wandb.log({"Number of different initial conditions: ": number_of_conditions})
 
         print(variables, "Variables")
         print(set_of_values,"Set of values for init conditions")
         print(iterations,"Iterations per value")
-        #wandb.log({"Set of values for init conditions: ": set_of_values})
-        #wandb.log({"Iterations per value: ": iterations})
+        return variables, set_of_values, iterations
+    
+    def create_init_table(self, set_of_values, iterations):
         init_condition_table = []   
         for k in range(len(set_of_values)):
             init_condition_table = self.append_element_set(init_condition_table, set_of_values[k], iterations[k])
         return init_condition_table
     
-    def create_init_conditions_set4(self, total_samples=1000):
+
+    def create_init_conditions_set3(self):
         """
-        Create initial conditions by sampling each variable independently within its range.
-        Instead of combinatorial sampling, generates a fixed number of samples where each
-        variable is sampled independently from its specified range.
- 
-        Args:
-            total_samples (int): Total number of initial condition samples to generate.
- 
-        Returns:
-            list: A matrix with initial conditions where each row is one sample.
+        Define the various initial conditions of the synchronous machine and return a matrix with all the possible combinations.
         """
-        if self.torch:# if using torch then use the nn_init_cond.yaml file to create collocation points init conditions
-            init_conditions_path = os.path.join(self.init_conditions_dir, self.model_flag,"nn_init_cond"+str(self.init_condition_bounds)+".yaml")
-        else: # 
-            init_conditions_path = os.path.join(self.init_conditions_dir, self.model_flag,"init_cond"+str(self.init_condition_bounds)+".yaml")
-        init_conditions = OmegaConf.load(init_conditions_path)
-        self.check_ic_yaml(init_conditions)
- 
-        # Extract ranges and variables from init_conditions
-        ranges = []
-        variables = []
-        for condition in init_conditions:
-            ranges.append(condition['range'])
-            variables.append(condition['name'])
- 
-        num_variables = len(ranges)
-        print(f"Creating {total_samples} initial condition samples")
-        print(f"Variables: {variables}")
-        print(f"Ranges: {ranges}")
- 
-        # Set random seed for reproducibility if specified
-        if self.seed is not None:
-            np.random.seed(self.seed)
- 
-        # Generate samples based on sampling method
-        if self.sampling == "Random":
-            # Generate random samples for all variables at once
-            samples = np.random.uniform(0, 1, (total_samples, num_variables))
-        elif self.sampling == "Linear":
-            # For linear sampling with multiple variables, we can use a grid approach
-            # but sample points along the diagonal or use sobol sequences
-            if num_variables == 1:
-                samples = np.linspace(0, 1, total_samples).reshape(-1, 1)
-            else:
-                # Use a simple approach: sample each variable linearly but offset
-                samples = np.zeros((total_samples, num_variables))
-                for i in range(num_variables):
-                    offset = i / num_variables
-                    linear_samples = (np.linspace(0, 1, total_samples) + offset) % 1.0
-                    samples[:, i] = linear_samples
-        elif self.sampling == "Lhs":
-            # Latin Hypercube Sampling - ideal for this type of sampling
-            samples = lhs(n=num_variables, samples=total_samples)
-        else:
-            raise Exception(f"Sampling method {self.sampling} not implemented")
- 
-        # Convert normalized samples to actual values within ranges
-        init_condition_table = []
-        for sample in samples:
-            condition = []
-            for i, (norm_val, value_range) in enumerate(zip(sample, ranges)):
-                if len(value_range) == 1:
-                    # Single value range
-                    actual_val = value_range[0]
-                else:
-                    # Map from [0,1] to [min, max]
-                    actual_val = value_range[0] + norm_val * (value_range[1] - value_range[0])
-                condition.append(actual_val)
-            init_condition_table.append(condition)
- 
-        print(f"Generated {len(init_condition_table)} initial condition samples using {self.sampling} sampling")
-        return init_condition_table
-    
-    def create_init_conditions_set5(
-        self,
-        previous_ICs,
-        previous_errors,
-        total_samples=1000,
-        exploration_ratio=0.2,
-        mutation_std=0.0,
-        range_scale=1.0,
-    ):
-        """
-        Generate initial conditions using an evolutionary (Evo) sampling strategy.
+        variables, set_of_values, iterations = self.create_init_conditions_info()
+        init_condition_table = self.create_init_table(set_of_values, iterations)
 
-        The Evo approach combines **exploitation** (reusing or perturbing high-error
-        initial conditions from a previous dataset) and **exploration** (sampling new,
-        unseen initial conditions within the physical variable ranges).
-
-        It builds upon the Random/LHS dataset (Set 4) and uses the ODE residuals
-        or other error metrics from that dataset to guide the selection of new ICs.
-
-        ---
-        Evolutionary strategy overview:
-        --------------------------------
-        - **Exploit:** Selects a fraction of previous ICs with the highest residual errors
-        and reuses them (optionally with Gaussian perturbations).
-        This focuses the dataset on regions where the model performed poorly.
-        - **Explore:** Generates a fraction of new ICs randomly or via Latin Hypercube Sampling
-        within the (possibly scaled) variable ranges.
-        This promotes diversity and helps the model generalize.
-
-        Both subsets are then combined to form the next generation of training ICs.
-
-        ---
-        Args
-        ----
-        previous_ICs : list or np.ndarray
-            Initial conditions used in the previous dataset (e.g. from Set 4).
-            Shape (N_prev, n_vars), where each row is one initial condition.
-
-        previous_errors : list or np.ndarray
-            Associated residuals or error scores for each previous IC.
-            Higher values indicate poorer model performance.
-
-        total_samples : int, default=1000
-            Total number of initial conditions to generate for the new dataset.
-
-        exploration_ratio : float, default=0.2
-            Fraction of new ICs to create via exploration (random/LHS sampling).
-            The remaining (1 - exploration_ratio) fraction is filled by exploiting
-            high-error ICs from the previous dataset.
-
-            Example:
-                - 0.0 → fully exploit high-error ICs (no exploration)
-                - 1.0 → fully random exploration (no reuse)
-                - 0.2 → 20% explore, 80% exploit (default balanced)
-
-        mutation_std : float, default=0.0
-            Standard deviation of Gaussian noise added to exploited ICs
-            to increase local diversity around known high-error points.
-            Expressed in absolute units of each IC variable.
-
-            Example:
-                - 0.0 → reuse high-error ICs exactly
-                - 0.05 → add small random perturbations to exploit ICs
-
-        range_scale : float, default=1.0
-            Global scaling factor applied to the variable ranges defined in the YAML file.
-            Values > 1.0 expand the IC space, allowing for extrapolative datasets.
-
-            Example:
-                - 1.0 → use original physical ranges
-                - 2.0 → double the width of each range (wider IC distribution)
-
-        ---
-        Returns
-        -------
-        init_condition_table : list of list[float]
-            The new set of initial conditions (ICs), where each inner list contains
-            one sample’s values for all state variables.
-
-            Shape: (total_samples, n_vars)
-
-        ---
-        Side Effects
-        ------------
-        Stores the final exploited and explored ICs as attributes for later visualization:
-            self.exploit_ics : np.ndarray of exploited ICs
-            self.explore_ics : list of newly sampled ICs
-
-        ---
-        Notes
-        -----
-        - Requires residuals or error metrics (`previous_errors`) from the previous dataset.
-        - Uses the same variable definitions and ranges as defined in the
-        corresponding `init_cond.yaml` or `nn_init_cond.yaml` file.
-        - Can be used iteratively across dataset generations to evolve IC distributions.
-
-        ---
-        Example
-        -------
-        >>> init_conditions_set5 = SM_model.create_init_conditions_set5(
-        ...     previous_ICs=init_conditions_set4,
-        ...     previous_errors=residuals_set4,
-        ...     total_samples=1000,
-        ...     exploration_ratio=0.2,
-        ...     mutation_std=0.05,
-        ...     range_scale=1.5
-        ... )
-        [Evo Sampling] Generated 1000 ICs: 800 exploit, 200 explore | range_scale=1.5, mutation_std=0.05
-        """
-        # --- Load ranges ---
-        init_conditions_path = os.path.join(
-            self.init_conditions_dir, self.model_flag,
-            ("nn_init_cond" if self.torch else "init_cond") + str(self.init_condition_bounds) + ".yaml"
-        )
-        init_conditions = OmegaConf.load(init_conditions_path)
-        self.check_ic_yaml(init_conditions)
-
-        # Apply range scaling
-        ranges = []
-        for cond in init_conditions:
-            r = cond["range"]
-            if len(r) > 1:
-                center = np.mean(r)
-                half_width = (r[1] - r[0]) / 2 * range_scale
-                scaled_range = [center - half_width, center + half_width]
-                ranges.append(scaled_range)
-            else:
-                ranges.append(r)
-        num_variables = len(ranges)
-
-        # --- Determine exploitation and exploration sizes ---
-        n_exploit = int((1 - exploration_ratio) * total_samples)
-        n_explore = int(total_samples - n_exploit)  # ensure integer
-
-        previous_ICs = np.array(previous_ICs)
-        previous_errors = np.array(previous_errors)
-
-        # --- Select top high-error ICs for exploitation ---
-        top_k_idx = np.argsort(previous_errors)[-n_exploit:]
-        exploit_ics = previous_ICs[top_k_idx]
-
-        # --- Generate exploratory ICs (LHS or random) ---
-        if self.seed is not None:
-            np.random.seed(self.seed)
-
-         # Add Gaussian mutation to exploit ICs if specified
-        if mutation_std > 0:
-            exploit_ics = exploit_ics + np.random.normal(0, mutation_std, exploit_ics.shape)
-
-        if n_explore > 0:  # only sample if exploration part > 0
-            if self.sampling == "Lhs":
-                samples = lhs(n=num_variables, samples=n_explore)
-            else:
-                samples = np.random.uniform(0, 1, size=(n_explore, num_variables))
-        else:
-            samples = np.empty((0, num_variables))  # no exploration part
-
-        explore_ics = []
-        for sample in samples:
-            condition = []
-            for norm_val, value_range in zip(sample, ranges):
-                if len(value_range) == 1:
-                    actual_val = value_range[0]
-                else:
-                    actual_val = value_range[0] + norm_val * (value_range[1] - value_range[0])
-                condition.append(actual_val)
-            explore_ics.append(condition)
-
-        init_condition_table = list(exploit_ics) + explore_ics
-        print(f"[Evo Sampling] {len(init_condition_table)} ICs ({n_exploit} exploit, {n_explore} explore) | "
-            f"range_scale={range_scale}, mutation_std={mutation_std}")
-
-        self.exploit_ics = exploit_ics
-        self.explore_ics = explore_ics
         return init_condition_table
 
-    def solve(self, x0, method, modelling_full):
+    def solve(self, x0, modelling_full, method=True): # method always must be true Modelling approach to be followed, ddelta = omega not ddelta = omega*Omega_B
         """
         Solve the differential equations for the synchronous machine model.
 
@@ -460,6 +269,16 @@ class ODE_modelling():
         - solution: solution of the differential equations
         """
 
+        
+        """
+        # Initial state
+        if self.model_flag=="SM_IB" or self.model_flag=="SM":
+            x0 = [self.theta, self.omega, self.E_d_dash, self.E_q_dash]
+        if self.model_flag=="SM_AVR":
+            x0 = [self.theta, self.omega, self.E_d_dash, self.E_q_dash, self.R_F, self.V_r, self.E_fd]
+        if self.model_flag=="SM_AVR_GOV":
+            x0 = [self.theta, self.omega, self.E_d_dash, self.E_q_dash, self.R_F, self.V_r, self.E_fd, self.P_m, self.P_sv]
+        """
         if method:
             solution = solve_ivp(modelling_full.odequations, self.t_span, x0, t_eval=self.t_eval)
         else:
@@ -481,14 +300,21 @@ class ODE_modelling():
 
         """
         self.t_span, self.t_eval = set_time(self.time, self.num_of_points)
+        self.total_init_conditions = len(init_conditions)
+        self.save_flag = True
         solution_all=[]
         if flag_time:
             start_time = time.time()   
             start_per_iteration = start_time
             time_list = [] 
-        for i in range(len(init_conditions)):
-            solution = self.solve(init_conditions[i], self.modelling_method, modelling_full)
-            solution_all.append(solution)
+        for i in range(self.total_init_conditions): # iterate over all the initial conditions
+            solution = self.solve(init_conditions[i], modelling_full) # solve the model for each initial condition
+            solution_all.append(solution) # append the solution to the solution_all list
+
+            if (i% self.config.save_freq == 0 and i>0) or i==(self.total_init_conditions-1): # save every save_freq iterations or when the last iteration is reached
+                self.save_dataset(solution_all, i)
+                solution_all = [] # reset the solution_all list
+
             if flag_time:
                 end_per_iteration = time.time()
                 time_list.append(end_per_iteration - start_per_iteration)
@@ -498,10 +324,12 @@ class ODE_modelling():
             end_time = time.time()
             #print mean and std of time per iteration
             print("Mean time per iteration: ", np.mean(time_list), " and std: ", np.std(time_list))
-            print(f"Time taken to solve the model for {len(init_conditions)} initial conditions: {end_time - start_time} seconds.")
-        return solution_all
+            print(f"Time taken to solve the model for {self.total_init_conditions} initial conditions: {end_time - start_time} seconds.")
+        return None
     
-    def save_dataset(self, solution, label=None):
+    
+    
+    def save_dataset(self, solution, iteration):
         """
         Create and save dataset for the model.
 
@@ -511,40 +339,48 @@ class ODE_modelling():
         Returns:
             list: The dataset of the synchronous machine.
         """
+        dataset_dir = self.config.dirs.dataset_dir
+        if self.save_flag: # create a new folder for the dataset only in the first iteration
+            if not os.path.exists(os.path.join(dataset_dir, self.model_flag)):
+                os.makedirs(os.path.join(dataset_dir, self.model_flag)) # create a new folder for the dataset if doesn't exist
+            #find number of folders in the dataset directory
+            self.num_of_folders = len([f for f in os.listdir(os.path.join(dataset_dir, self.model_flag)) if os.path.isdir(os.path.join(dataset_dir, self.model_flag, f))])
+            self.dataset_folder_path = os.path.join(dataset_dir, self.model_flag, "dataset_v" + str(self.num_of_folders + 1),"raw")
+            os.makedirs(self.dataset_folder_path)
+            print(f"Created dataset folder: {os.path.dirname(self.dataset_folder_path)}")
+
+            self.save_flag = False
+
+        dataset_path = os.path.join(self.dataset_folder_path,"file" + str(iteration) + ".pkl")
+
         dataset = []
         for i in range(len(solution)):
             r = [solution[i].t]  # append time to directory
-            for j in range(len(solution[i].y)):
+            # for j in range(self.keys_length): # save only the keys not the external keys
+            for j in range(len(solution[i].y)): #must save all the keys due to the preprocessing of the NN dataset
                 r.append(solution[i].y[j])  # append the solution at each time step
             dataset.append(r)
 
-        # check if folder exists if not create it
-        if not os.path.exists(os.path.join(self.dataset_dir, self.model_flag)):
-            os.makedirs(os.path.join(self.dataset_dir, self.model_flag))
-            
-        target_dir = os.path.join(self.dataset_dir, self.model_flag)
-
-        # If no label → continue numbering scheme
-        if label is None:
-            num_files = len([
-                f for f in os.listdir(target_dir)
-                if os.path.isfile(os.path.join(target_dir, f))
-            ])
-            filename = f"dataset_v{num_files + 1}.pkl"
-        else:
-            # Use label directly
-            filename = f"dataset_{label}.pkl"
-
-        dataset_path = os.path.join(target_dir, filename)
-
-        # Save dataset
+        # save the dataset as pickle in the dataset directory
         with open(dataset_path, 'wb') as f:
             pickle.dump(dataset, f)
+        #with h5py.File(self.hdf5_path, 'w') as f:
+        #    f.create_dataset('trajectories', data=np.array(dataset, dtype=np.float32), chunks=True, compression='gzip')
+        # count the number of files in the directory
+        if iteration == self.total_init_conditions - 1:
+            num_of_files = len([f for f in os.listdir(self.dataset_folder_path) if os.path.isfile(os.path.join(self.dataset_folder_path, f))])
+            print(f'Saved dataset folder"{self.model_flag, "dataset_v" + str(self.num_of_folders + 1)}" with {num_of_files} files.')
+            wandb.log({"Dataset folder": f'Saved dataset "{self.model_flag, "dataset_v" + str(self.num_of_folders + 1)}" with {num_of_files} files.'})
+            #Create txt file with the number of files, and the file that gave the initial conditions
+            with open(os.path.join(os.path.dirname(self.dataset_folder_path), "info.txt"), "w") as text_file:
+                text_file.write(f"Number of files: {num_of_files}\n")
+                text_file.write(f"Initial conditions file: {self.init_conditions_path}\n")
+                text_file.write(f"Number of different simulated trajectories: {self.total_init_conditions}\n")
+                #write the time and the number of points
+                text_file.write(f"Time horizon of the simulations: {self.time}\n")
+                text_file.write(f"Number of points in the each simulation: {self.num_of_points}\n")
+        return 
 
-        print(f'Saved dataset: "{filename}" in "{target_dir}"')
-        wandb.log({"Dataset saved": filename})
-
-        return dataset
 
     def load_dataset(self, name):
         """
@@ -556,7 +392,8 @@ class ODE_modelling():
         Returns:
             list: The dataset of the synchronous machine.
         """
-        dataset_path = os.path.join(self.dataset_dir, self.model_flag, name)
+        dataset_dir = self.config.dirs.dataset_dir
+        dataset_path = os.path.join(dataset_dir, self.model_flag, name)
         with open(dataset_path, 'rb') as f:
             dataset = pickle.load(f)
         return dataset

@@ -6,7 +6,9 @@ import torch
 # Set time
 def set_time(end_time, interval_points):
     t_span = (0, end_time)
-    t_eval = np.linspace(0, end_time, interval_points)
+    #step = end_time/interval_points
+    #t_eval = np.arange(0, end_time+step, step)
+    t_eval = np.linspace(0, end_time, interval_points + 1) # we want to include the starting point and the end point
     return t_span, t_eval
 
 def set_random_seeds(random_seed=0):
@@ -14,7 +16,8 @@ def set_random_seeds(random_seed=0):
     torch.manual_seed(random_seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False # set in hydra
-    np.random.seed(random_seed)
+    np.random.seed(random_seed)# done
+    #random.seed(random_seed) # done   
     return   
 
 # Plotting the solution
@@ -199,7 +202,21 @@ def checkflag(not_ib_flag,avr_flag,gov_flag):
     return True
 
 
+def calculate_current(theta, E_d_dash, E_q_dash, X_d_dash, X_q_dash, Rs, Vs, theta_vs):
+    Rs=0.0
+    Re=0.0
+    Xep=0.0
+    alpha = [[(Rs+Re), -(X_q_dash+Xep)], [(X_d_dash+Xep), (Rs+Re)]]
+    beta = [[E_d_dash - Vs*np.sin(theta-theta_vs)], [E_q_dash - Vs*np.cos(theta-theta_vs)]]
 
+    inv_alpha = np.linalg.inv(alpha)
+    I_d= inv_alpha[0][0]*beta[0][0] + inv_alpha[0][1]*beta[1][0]
+    I_q= inv_alpha[1][0]*beta[0][0] + inv_alpha[1][1]*beta[1][0]
+        
+    #I_t = np.matmul(inv_alpha, beta)
+    #I_d = I_t[0][0]
+    #I_q = I_t[1][0]
+    return I_d, I_q
 
 
 def log_data_metrics_to_wandb(run, config):

@@ -1,7 +1,7 @@
 figs/
 __pycache__/
 *.pyc
-data/
+#data/
 outputs/
 wandb/
 model/
@@ -9,4 +9,6 @@ logs/
 .vscode/
 .mypy_cache/
 .ruff_cache/
+pinn/
+.DS_Store
 

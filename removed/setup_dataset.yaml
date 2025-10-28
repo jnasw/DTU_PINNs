@@ -1,0 +1,19 @@
+wandb:
+  api_key: "f59f1641c244c4b01676975c59bf902da71a5e9c"
+  project: "Project_PINN_for_synchronous_machine"
+
+time : 1 # Total time
+num_of_points : 1000 # Number of points
+modelling_method : True # Modelling approach to be followed, ddelta = omega or ddelta = omega*Omega_B
+
+model:
+  model_flag : "SM_AVR_GOV" #  Choose between "SM_IB" or "SM4" or "SM_AVR" or "SM_AVR_GOV" or "SM6"
+  machine_num : 7
+  init_condition_bounds : 1
+  sampling: "Lhs" # Choose between "Lhs" or "Linear" or "Random"
+  torch : False
+
+dirs:
+  params_dir :  ${hydra:runtime.cwd}/src/conf/params
+  init_conditions_dir : ${hydra:runtime.cwd}/src/conf/initial_conditions
+  dataset_dir : ${hydra:runtime.cwd}/data

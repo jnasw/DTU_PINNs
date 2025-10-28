@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from omegaconf import OmegaConf
 import wandb
-from src.nn.nn_model import Net, Network, PinnA, Kalm, FullyConnectedResNet
+from src.nn.nn_model import Net, Network, PinnA, Kalm, FullyConnectedResNet, ActNet
 import os
 import numpy as np
 import pandas as pd
@@ -35,7 +35,7 @@ def find_files(cfg, dir, list_in_name=None):
 
 
 def define_model_from_name(name):
-    name_list = ["DynamicNN", "PinnA", "PinnAA", "PinnB", "KAN"]
+    name_list = ["DynamicNN", "PinnA", "PinnAA", "PinnB", "KAN", "actnet"]
     #CHECK if name_list is in the name
     for n in name_list:
         if n in name:
@@ -66,12 +66,23 @@ def define_nn_model(cfg, input_dim, output_dim):
     """
     This function defines the neural network model
     """
-    print("Selected deep learning model: ",cfg.nn.type)
+    print("Selected deep learning model: ",cfg.nn.type)        
     if cfg.nn.type == "KAN": # Static architecture of the neural network
         model = Kalm(input_dim, cfg.nn.hidden_dim, output_dim, cfg.nn.hidden_layers)
         # model.speed()
     elif cfg.nn.type == "StaticNN": # Static architecture of the neural network
         model = Net(input_dim, cfg.nn.hidden_dim, output_dim)
+    elif cfg.nn.type == "actnet":
+        model = ActNet(
+                input_dim=input_dim,
+                embed_dim= cfg.nn.hidden_dim,
+                num_layers=cfg.nn.hidden_layers,
+                out_dim=output_dim,
+                num_freqs=cfg.nn.num_freqs,
+                # w0_fixed=torch.pi,
+                freq_scaling=cfg.nn.freq_scaling,
+                freq_scaling_eps=cfg.nn.freq_scaling_eps,
+            )
     elif cfg.nn.type == "DynamicNN" or cfg.nn.type == "PinnB" or cfg.nn.type == "PinnA": # Dynamic architecture of the neural network
         model = Network(input_dim, cfg.nn.hidden_dim, output_dim, cfg.nn.hidden_layers)
     elif cfg.nn.type == "PinnAA": # Dynamic architecture of the neural network with the PinnA architecture for the output
@@ -106,7 +117,7 @@ def forward_pass(model, data_network, input):
         return (no_time* divide[1:] + minus[1:]) + y_pred*(time* divide[0] + minus[0])
     if data_network.cfg.nn.type == "PinnB":
         return no_time + y_pred
-    if data_network.cfg.nn.type == "DynamicNN" or data_network.cfg.nn.type == "PinnAA" or data_network.cfg.nn.type == "KAN":
+    if data_network.cfg.nn.type == "DynamicNN" or data_network.cfg.nn.type == "PinnAA" or data_network.cfg.nn.type == "KAN" or data_network.cfg.nn.type == "actnet":
         return y_pred
     else:
         raise Exception('Enter valid NN type! (zeroth_order or first_order')
@@ -169,7 +180,9 @@ def data_input_target_limited(solution, time_limit):
         y_train = training_sample_l[1:].T.clone().detach()
         x_train = training_sample_l.T
         x_train[:,1:]=x_train[0][1:]
-
+        #discrard the first row of x_train and y_train as they are the same
+        #x_train = x_train[1:]
+        #y_train = y_train[1:]
         x_train = x_train.clone().detach().requires_grad_(True)
         x_train_list = torch.cat((x_train_list, x_train), 0)
         y_train_list = torch.cat((y_train_list, y_train), 0)

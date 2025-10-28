@@ -1,0 +1,19 @@
+theta : [-2,2]
+theta_iterations : 5
+omega : [-5,5]
+omega_iterations : 300
+E_q_dash : [1,1.5]
+E_q_dash_iterations : 2
+E_d_dash : [1]
+E_d_dash_iterations : 4
+
+R_F : [1]
+R_F_iterations : 1
+V_r : [1.105]
+V_r_iterations : 1
+E_fd : [1.08]
+E_fd_iterations : 1
+P_sv : [0.7048]
+P_sv_iterations : 1
+P_m : [0.7048]
+P_m_iterations : 1

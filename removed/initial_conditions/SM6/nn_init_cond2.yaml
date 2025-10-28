@@ -1,0 +1,15 @@
+- {name: theta, range: [-2, 2], iterations: 5}
+- {name: omega, range: [-5, 5], iterations: 300}
+- {name: E_d_dash, range: [0], iterations: 1}
+- {name: E_q_dash, range: [0.9, 1.1], iterations: 2}
+
+
+
+#theta : [-10,10]
+#theta_iterations : 100
+#omega : [-5,5]
+#omega_iterations : 100
+#E_q_dash : [0,2]
+#E_q_dash_iterations : 10
+#E_d_dash : [0,1]
+#E_d_dash_iterations : 2

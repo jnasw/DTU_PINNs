@@ -61,8 +61,8 @@ class PINNWeighting:
         # Calculate losses
         # If loss_dimension is 1, then we need to take mean of the losses
         if self.loss_dimension == 1:
-            loss_dt = torch.mean(torch.stack(loss_dt))
-            loss_pinn = torch.mean(torch.stack(loss_pinn))
+            loss_dt = loss_dt.mean()#torch.mean(torch.stack(loss_dt))
+            loss_pinn = loss_pinn.mean()#torch.mean(torch.stack(loss_pinn))
 
         #SOS multiply with loss_dimension to balance it
         loss_data_ = self.weights[0]  * loss_data * self.loss_dimension
