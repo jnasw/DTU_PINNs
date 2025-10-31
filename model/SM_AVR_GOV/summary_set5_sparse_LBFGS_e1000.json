@@ -1,0 +1,13 @@
+{
+  "dataset": "set5_sparse",
+  "final": {
+    "data": 8.686801265866961e-06,
+    "dt": 0.09340794384479523,
+    "pinn": 0.06286332756280899,
+    "pinn_ic": 0.00017496146028861403,
+    "total": 0.1564549058675766
+  },
+  "epochs": 1000,
+  "checkpoint": "pinn_set5_sparse_LBFGS_e1000.pth",
+  "log_csv": "trainlog_set5_sparse_LBFGS_e1000.csv"
+}

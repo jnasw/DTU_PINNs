@@ -1,0 +1,13 @@
+{
+  "dataset": "set5_dense",
+  "final": {
+    "data": 5.758642146247439e-06,
+    "dt": 0.0672086849808693,
+    "pinn": 0.031929705291986465,
+    "pinn_ic": 9.049812069861218e-05,
+    "total": 0.09923464059829712
+  },
+  "epochs": 1000,
+  "checkpoint": "pinn_set5_dense_LBFGS_e1000.pth",
+  "log_csv": "trainlog_set5_dense_LBFGS_e1000.csv"
+}
