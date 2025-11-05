@@ -1,0 +1,5 @@
+{
+  "dataset": "set5_mixed",
+  "epochs": 1000,
+  "checkpoint": "pinn_set5_mixed_baseline_e1000.pth"
+}
