@@ -16,6 +16,8 @@ from src.nn.gradient_based_weighting import PINNWeighting
 import numpy as np
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, TensorDataset
+import csv
+import time
 
 
 class NeuralNetworkActions():
@@ -111,7 +113,6 @@ class NeuralNetworkActions():
         
         self.model = self.model.to(self.device)
         self.early_stopping = EarlyStopping(patience=cfg.nn.early_stopping_patience, verbose=True, delta=cfg.nn.early_stopping_min_delta)
-        
 
 
     def setup_nn(self):
@@ -572,7 +573,7 @@ class NeuralNetworkActions():
         
         self.initialize_loss_weights(weight_data, weight_dt, weight_pinn, weight_pinn_ic)
 
-        
+
         print("getting in training")
 
         for epoch in range(self.cfg.nn.num_epochs):
@@ -649,7 +650,9 @@ class NeuralNetworkActions():
                     self.early_stopping.save_checkpoint(val_loss, self.model)
                     break
 
-        if self.early_stopping.early_stop == True or (epoch + 1) % save_iteration != 0:
+        #if self.early_stopping.early_stop == True or (epoch + 1) % save_iteration != 0:
+        if self.early_stopping.early_stop == True or (epoch + 1) % save_iteration == 0 or (epoch + 1) == self.cfg.nn.num_epochs:
+            os.makedirs(os.path.join(self.cfg.dirs.model_dir, folder_name), exist_ok=True)
             name = f"{self.cfg.model.model_flag}{self.cfg.nn.type}_{self.cfg.time}_{epoch+1}_{self.data_loader.training_shape}_{self.data_loader.training_col_shape}_{self.data_loader.validation_shape}_{self.cfg.dataset.transform_input}_{self.cfg.dataset.transform_output}_{weight_data}_{weight_dt}_{weight_pinn}_{weight_pinn_ic}_{self.cfg.nn.weighting.update_weight_method}.pth"
             self.save_model(os.path.join(folder_name, name))
         
@@ -732,11 +735,33 @@ class NeuralNetworkActions():
         os.makedirs(os.path.join(self.cfg.dirs.model_dir, folder_name),exist_ok=True)
         self.wandb_run = wandb_run
         
+        # initialise weighting and store data for weighting
         self.weighting_scheme = PINNWeighting(self.model, self.cfg, self.device, self.output_dim, self.wandb_run)
+        self.weighting_scheme.x_train        = x_train
+        self.weighting_scheme.y_train        = y_train
+        self.weighting_scheme.x_train_col    = x_train_col
+        self.weighting_scheme.x_train_col_ic = x_train_col_ic
+        self.weighting_scheme.y_train_col_ic = y_train_col_ic
+
         # Variable to accumulate the total iteration count
         #total_iteration_count = 0
         # Variable to store the last update iteration
         #last_update_iteration = 0
+
+        # add file logging for later analysis
+        start_time = time.time()
+        log_path = os.path.join(self.cfg.dirs.model_dir, folder_name, f"training_log_{self.cfg.nn.weighting.update_weight_method}.csv")
+
+        with open(log_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "epoch",
+                "train_total", "train_data", "train_dt", "train_pinn", "train_pinn_ic",
+                "val_total", "val_data", "val_dt",
+                "weight_data", "weight_dt", "weight_pinn", "weight_pinn_ic",
+                "elapsed_s"
+            ])
+            print(f"Logging training to {log_path}")
 
         print("getting in training")
         for epoch in range(self.cfg.nn.num_epochs):
@@ -776,6 +801,7 @@ class NeuralNetworkActions():
 
                         self.optimizer.zero_grad() # zero the gradients
                         loss_total.backward() # backpropagate the total weighted loss
+                        #loss_total.backward(retain_graph=True)
                         
                         return loss_total
                 
@@ -826,17 +852,77 @@ class NeuralNetworkActions():
 
             #if total_iteration_count - last_update_iteration > self.cfg.nn.weighting.update_weights_freq:
                 # update the weights of the loss functions
-            #    last_update_iteration = total_iteration_count
+            #   last_update_iteration = total_iteration_count
+            # if (epoch + 1) % self.cfg.nn.weighting.update_weights_freq == 0:
+            #     if self.cfg.nn.weighting.update_weight_method=="Sam":
+            #         self.weighting_scheme.update_weights(self.losses, epoch)
+            #     elif self.cfg.nn.weighting.update_weight_method != "Static":
+            #         print("updating using", self.cfg.nn.weighting.update_weight_method)
+            #         #self.weighting_scheme.update_weights(self.losses, epoch)
+            #         self.weighting_scheme.update_weights_new(epoch)
+            
+            #     # log some plots to wandb
+            #     if wandb_run is not None:
+            #         self.log_plot(val_outputs, y_val, epoch, wandb_run,x_val)
+
             if (epoch + 1) % self.cfg.nn.weighting.update_weights_freq == 0:
                 if self.cfg.nn.weighting.update_weight_method=="Sam":
                     self.weighting_scheme.update_weights(self.losses, epoch)
-            
-                # log some plots to wandb
-                if wandb_run is not None:
-                    self.log_plot(val_outputs, y_val, epoch, wandb_run,x_val)
-                
-            if (epoch + 1 ) % 50 == 0:
-                print(f'Epoch [{epoch+1}/{self.cfg.nn.num_epochs}], Loss: {self.loss_total.item():.4f}, Loss_data: {self.loss_data.item():.4f}, Loss_dt: {self.loss_dt.item():.4f}, Loss_pinn: {self.loss_pinn.item():.4f} , Loss_pinn_ic : {self.loss_pinn_ic.item():.4f}', val_loss, val_dt_loss)
+                elif self.cfg.nn.weighting.update_weight_method != "Static":
+                    print(f"Updating weights at epoch {epoch+1}")
+
+                    # Rebuild forward & compute fresh losses for weighting
+                    self.model.train()
+                    for x in [x_train, x_train_col, x_train_col_ic]:
+                        x.requires_grad_(True)
+
+                    output, dydt0, ode0 = self.calculate_point_grad2(x_train, y_train)
+                    dydt1, ode1 = self.calculate_point_grad2(x_train_col, None)
+                    output_ic = self.forward_pass(x_train_col_ic)
+
+                    L_data = self.criterion(output, y_train)
+                    L_dt   = torch.mean(torch.stack([
+                        self.criterion(dydt0[:, i], ode0[:, i]) for i in range(dydt0.shape[1])
+                    ]))
+                    L_pinn = torch.mean(torch.stack([
+                        self.criterion(dydt1[:, i], ode1[:, i]) for i in range(dydt1.shape[1])
+                    ]))
+                    L_ic   = self.criterion(output_ic, y_train_col_ic)
+
+                    # Package all losses and send to weighting class
+                    losses = [L_data, L_dt, L_pinn, L_ic]
+                    self.weighting_scheme.update_weights_new(losses, epoch)
+
+                    print(f"Epoch {epoch+1} – Current weights:", self.weighting_scheme.weights.detach().cpu().numpy())
+
+                # save metrics each 50 epochs to csv file    
+                if (epoch + 1 ) % 50 == 0:
+                    print(f'Epoch [{epoch+1}/{self.cfg.nn.num_epochs}], Loss: {self.loss_total.item():.4f}, Loss_data: {self.loss_data.item():.4f}, Loss_dt: {self.loss_dt.item():.4f}, Loss_pinn: {self.loss_pinn.item():.4f} , Loss_pinn_ic : {self.loss_pinn_ic.item():.4f}', val_loss, val_dt_loss)
+                    val_total = val_loss + val_dt_loss
+                    elapsed_time = time.time() - start_time
+
+                    weights_np = self.weighting_scheme.weights.detach().cpu().numpy()
+                    w_data, w_dt, w_pinn, w_ic = weights_np.tolist()
+
+                    with open(log_path, "a", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            epoch + 1,
+                            self.loss_total.item(),
+                            self.loss_data.item(),
+                            self.loss_dt.item(),
+                            self.loss_pinn.item(),
+                            self.loss_pinn_ic.item(),
+                            val_total,
+                            val_loss,
+                            val_dt_loss,
+                            float(w_data),
+                            float(w_dt),
+                            float(w_pinn),
+                            float(w_ic),
+                            elapsed_time,
+                        ])
+
 
             # log all the losses for the epoch to wandb 
             save_iteration = 500 if self.cfg.nn.optimizer == "LBFGS" else 10000 # 20 iterations within the optimizer ->500*20 = 10000
@@ -845,6 +931,9 @@ class NeuralNetworkActions():
                 name = f"{self.cfg.model.model_flag}{self.cfg.nn.type}_{self.cfg.time}_{epoch+1}_{self.data_loader.training_shape}_{self.data_loader.training_col_shape}_{self.data_loader.validation_shape}_{self.cfg.dataset.transform_input}_{self.cfg.dataset.transform_output}_{self.weight_data}_{self.weight_dt}_{self.weight_pinn}_{self.weight_pinn_ic}_{self.cfg.nn.weighting.update_weight_method}.pth"
 
                 self.save_model(os.path.join(folder_name, name))
+
+                weights_np = self.weighting_scheme.weights.detach().cpu().numpy()
+                w_data, w_dt, w_pinn, w_ic = weights_np.tolist()
             
                 if wandb_run is not None:
                     log_data = {
@@ -855,10 +944,10 @@ class NeuralNetworkActions():
                         "Loss_dt": self.loss_dt,
                         "Loss_pinn": self.loss_pinn,
                         "Loss_pinn_ic": self.loss_pinn_ic,
-                        "Weight_data": self.weight_data,
-                        "Weight_dt": self.weight_dt,
-                        "Weight_pinn": self.weight_pinn,
-                        "Weight_pinn_ic": self.weight_pinn_ic,
+                        "Weight_data": float(w_data),
+                        "Weight_dt": float(w_dt),
+                        "Weight_pinn": float(w_pinn),
+                        "Weight_pinn_ic": float(w_ic),
                         "epoch": epoch
                     }
                     wandb_run.log(log_data)

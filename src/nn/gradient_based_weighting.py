@@ -74,44 +74,46 @@ class PINNWeighting:
         
         # Calculate total loss
         self.total_loss = torch.stack(individual_weighted_losses).sum()        
-        # Update weights with the desired frequency, iteration_count is used to check if the update is needed and not epoch due to lbfgs internal iterations
-        if (epoch + 1) % self.update_weights_freq == 0 and self.scheme != 'Sam': 
-            if epoch != self.epoch_flag: # To avoid multiple updates in the same epoch
-                self.update_weights(individual_weighted_losses, epoch)
-                #print("Updated Weights", self.weights.tolist())
-                self.epoch_flag = epoch
+
+        #  IMPORTANT: DO NOT UPDATE WEIGHTS HERE except for SAM
+        # if self.scheme == "Sam":
+        #     # Sam must update inside closure because its grads depend on closure backward()
+        #     self.update_weights(individual_weighted_losses, epoch)
+
+        # For all other schemes: update is done safely OUTSIDE the closure
+        # via update_weights_new()
+
         return self.total_loss, individual_weighted_losses
 
-
     def update_weights(self, losses, epoch):
-        if self.scheme == 'Gradient':
-            # Gradient-based weighting update
-            grad_norms = []
-            for loss in losses:
-                #check if weight_mask is 0 or not
-                if self.weight_mask[len(grad_norms)] == 0:
-                    grad_norms.append(0)
-                    continue
-                self.model.zero_grad()
-                loss.backward(retain_graph=True)
-                grad_norm = torch.norm(torch.stack([torch.norm(p.grad) for p in self.model.parameters() if p.grad is not None]))
-                # Check if grad_norm is NaN and skip if it is
-                if torch.isnan(grad_norm):
-                    print("Warning: NaN gradient norm detected.")
-                    grad_norms.append(torch.tensor(0.0)) # Append 0 to avoid division by zero
-                else:
-                    grad_norms.append(grad_norm.item())
+        # if self.scheme == 'Gradient':
+        #     # # Gradient-based weighting update
+        #     grad_norms = []
+        #     for loss in losses:
+        #         #check if weight_mask is 0 or not
+        #         if self.weight_mask[len(grad_norms)] == 0:
+        #             grad_norms.append(0)
+        #             continue
+        #         self.model.zero_grad()
+        #         loss.backward(retain_graph=True)
+        #         grad_norm = torch.norm(torch.stack([torch.norm(p.grad) for p in self.model.parameters() if p.grad is not None]))
+        #         # Check if grad_norm is NaN and skip if it is
+        #         if torch.isnan(grad_norm):
+        #             print("Warning: NaN gradient norm detected.")
+        #             grad_norms.append(torch.tensor(0.0)) # Append 0 to avoid division by zero
+        #         else:
+        #             grad_norms.append(grad_norm.item())
                 
-            grad_norms = torch.tensor(grad_norms)
-            grad_norms = torch.nan_to_num(grad_norms, nan=0.0)  # Replace NaN with 0
+        #     grad_norms = torch.tensor(grad_norms)
+        #     grad_norms = torch.nan_to_num(grad_norms, nan=0.0)  # Replace NaN with 0
 
-            grad_norms_avg = torch.mean(grad_norms)
-            new_weights = grad_norms_avg / (grad_norms + 1e-8)
-            #print('grad norms are', grad_norms)
-            #print('grad norms avg is', grad_norms_avg)
-            #print('New weights are', new_weights)
+        #     grad_norms_avg = torch.mean(grad_norms)
+        #     new_weights = grad_norms_avg / (grad_norms + 1e-8)
+        #     print('grad norms are', grad_norms)
+        #     print('grad norms avg is', grad_norms_avg)
+        #     print('New weights are', new_weights)
 
-        elif self.scheme == 'Ntk':
+        if self.scheme == 'Ntk':
             # NTK-based weighting update
             ntk_traces = []
             for loss in losses:
@@ -163,7 +165,12 @@ class PINNWeighting:
             raise ValueError("Unknown weighting scheme. Choose either 'gradient' or 'ntk' or 'sam'.")
         
         # Update weights using moving average
-        self.weights = ( self.weights * self.weight_mask + self.balancing_term *  new_weights.to(self.weights.device)) * self.weight_mask
+        #self.weights = ( self.weights * self.weight_mask + self.balancing_term *  new_weights.to(self.weights.device)) * self.weight_mask
+        with torch.no_grad():
+            self.weights.data = (
+                self.weights.data * self.weight_mask
+                + self.balancing_term * new_weights.to(self.weights.device)
+            ) * self.weight_mask
         print("new weights 0.01*",new_weights)
         print(self.weights)
         
@@ -171,6 +178,110 @@ class PINNWeighting:
 
         return
     
+    def update_weights_new(self, losses, epoch):
+        """
+        Unified gradient-based weight update:
+        - GradientNorm      (scheme='Gradient')
+        - Inverse-Dirichlet (scheme='ID')
+        - Dynamic-Norm      (scheme='DN')
+        - Weight-Balanced   (scheme='WB')
+        """
+
+        scheme = self.scheme
+        if scheme not in ["Gradient", "ID", "DN", "WB"]:
+            return  # skip for other schemes
+
+        print(f"\n[Epoch {epoch}] Updating weights ({scheme})")
+
+        self.model.train()
+        params = [p for p in self.model.parameters() if p.requires_grad]
+
+        grad_norms = []   # list of per-loss gradient norms
+        grad_vecs  = []   # flattened gradients (needed for ID / WB)
+
+        # Assign the new weights depending on the scheme
+
+        for i, L in enumerate(losses):
+
+            # Compute ∇θ L_i
+            grads = torch.autograd.grad(
+                L,
+                params,
+                retain_graph=True,
+                create_graph=False,
+                allow_unused=True
+            )
+
+            # Filter out None gradients (can happen due to unused params)
+            grads = [g for g in grads if g is not None]
+            if len(grads) == 0:
+                print(f"Loss {i} produced no gradients. Skipping.")
+                grad_norms.append(torch.tensor(0.0, device=self.device))
+                grad_vecs.append(torch.zeros(1, device=self.device))
+                continue
+
+            # Compute gradient norm
+            gnorm = torch.sqrt(sum((g**2).sum() for g in grads))
+            grad_norms.append(gnorm.detach())
+
+            # Flatten gradient vector
+            flat = torch.cat([g.flatten() for g in grads])
+            grad_vecs.append(flat.detach())
+
+            # Log gradient norm
+            if self.wandb_run is not None:
+                self.wandb_run.log({f"grad_norm_{i}": gnorm.item(), "epoch": epoch})
+            print(f"  ‖∇θ L_{i}‖ = {gnorm.item():.3e}")
+
+        grad_norms = torch.stack(grad_norms)
+
+        # Assign the new weights depending on the scheme
+
+        if scheme == "Gradient":
+            # Classic GradNorm inverse-proportional weighting
+            grad_norms_avg = grad_norms.mean()
+            new_weights = grad_norms_avg / (grad_norms + 1e-8)
+            new_weights = new_weights / new_weights.sum()
+
+        elif scheme == "ID":
+            # Variance-based inverse-Dirichlet
+            variances = torch.tensor([torch.var(g) for g in grad_vecs], device=self.device)
+            var_ref = torch.max(variances)
+            new_weights = var_ref / (variances + 1e-8)
+            new_weights = new_weights / new_weights.sum()
+
+        elif scheme == "DN":
+            # Dynamic Norm scheme
+            ref_norm = grad_norms[2]  # PINN term as reference
+            new_weights = ref_norm / (grad_norms + 1e-8)
+
+            # Smooth weights over time
+            alpha = 0.9
+            if hasattr(self, "prev_weights"):
+                new_weights = alpha * self.prev_weights + (1 - alpha) * new_weights
+
+            self.prev_weights = new_weights.detach()
+            new_weights = new_weights / new_weights.sum()
+
+        elif scheme == "WB":
+            # Combine DN + ID effects
+            norms = torch.tensor([torch.norm(g) for g in grad_vecs], device=self.device)
+            variances = torch.tensor([torch.var(g) for g in grad_vecs], device=self.device)
+
+            norm_ref = norms[2]
+            var_ref  = variances[2]
+
+            new_weights = (norm_ref / (norms + 1e-8)) * (var_ref / (variances + 1e-8))
+            new_weights = new_weights / new_weights.sum()
+
+        # Assign the new weights
+        with torch.no_grad():
+            self.weights.data.copy_(new_weights.to(self.device))
+
+        print("  → Updated weights:", [round(w.item(), 4) for w in new_weights])
+        self.log_weights(epoch)
+    
+
     def log_weights(self, epoch):
         if self.scheme == 'Sam':
             if self.wandb_run is not None and epoch!=0:
